@@ -15,13 +15,17 @@ preview, as JSON or CSV) are in place; **restore is not yet supported.** See
 
 ## Install
 
-Homebrew is the intended install path once the tap is published (tracked for the
-C4 packaging step):
+Install via Homebrew:
 
-    # Available at release — not published yet:
     brew install deaugarcon/tap/trug
 
-Until then, build from source (the working path today) — see **Build (dev)**.
+Or build from source — see **Build (dev)**.
+
+> **macOS 27 beta note:** Command Line Tools 27 beta 2 ships a SwiftPM defect
+> (package-manifest linking fails). If you are on the macOS 27 beta, install
+> full Xcode 27 beta and make it the active toolchain
+> (`sudo xcode-select -s /Applications/Xcode-beta.app/Contents/Developer`)
+> before installing.
 
 ## Requirements
 
