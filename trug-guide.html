@@ -1,0 +1,354 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>trug — your iPhone's data, on your Mac, and nowhere else</title>
+<style>
+  :root {
+    --ink: #1a1d21;
+    --slate: #5b6670;
+    --paper: #f4f6f7;
+    --card: #ffffff;
+    --pine: #0f6b5c;
+    --amber: #8a5a00;
+    --hairline: #d8dde0;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+    font-size: 17px;
+    line-height: 1.65;
+  }
+  .display {
+    font-family: ui-serif, "New York", Georgia, "Times New Roman", serif;
+    font-weight: 600;
+    letter-spacing: -0.015em;
+  }
+  code, pre, .mono {
+    font-family: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  .wrap { max-width: 46rem; margin: 0 auto; padding: 0 1.25rem; }
+
+  /* ---------- header ---------- */
+  header { padding: 4.5rem 0 3rem; }
+  .wordmark { font-size: 1rem; color: var(--pine); font-weight: 700; letter-spacing: 0.08em; }
+  .wordmark::after { content: " · local iPhone backup & inspection"; color: var(--slate); font-weight: 400; letter-spacing: 0; }
+  h1 {
+    font-size: clamp(2.1rem, 6vw, 3.1rem);
+    line-height: 1.12;
+    margin: 1.1rem 0 1.2rem;
+  }
+  h1 em { font-style: normal; color: var(--pine); }
+  .lede { font-size: 1.12rem; color: var(--slate); max-width: 40rem; }
+
+  /* ---------- terminal block ---------- */
+  pre.term {
+    background: var(--ink);
+    color: #e8ebe9;
+    border-radius: 10px;
+    padding: 1.1rem 1.3rem;
+    font-size: 0.86rem;
+    line-height: 1.75;
+    overflow-x: auto;
+    margin: 1.6rem 0;
+  }
+  pre.term .p { color: #7fd1c0; user-select: none; }   /* prompt */
+  pre.term .c { color: #8b959c; }                       /* comment */
+  pre.term .o { color: #b8c2c9; }                       /* output */
+
+  /* ---------- sections ---------- */
+  section { padding: 2.4rem 0; border-top: 1px solid var(--hairline); }
+  .eyebrow {
+    font-size: 0.74rem; font-weight: 700; letter-spacing: 0.14em;
+    text-transform: uppercase; color: var(--pine); margin-bottom: 0.6rem;
+  }
+  h2 { font-size: 1.55rem; margin-bottom: 0.9rem; }
+  h3 { font-size: 1.05rem; margin: 1.4rem 0 0.4rem; }
+  p + p { margin-top: 0.8rem; }
+  section p, section li { color: #2c3237; }
+  ul, ol { padding-left: 1.3rem; margin: 0.6rem 0; }
+  li + li { margin-top: 0.35rem; }
+  a { color: var(--pine); }
+  a:focus-visible, input:focus-visible + .flip-labels label,
+  button:focus-visible, label:focus-visible {
+    outline: 2px solid var(--pine); outline-offset: 2px; border-radius: 2px;
+  }
+  code:not(pre code) {
+    background: #e7ebec; border-radius: 4px; padding: 0.1em 0.35em; font-size: 0.86em;
+  }
+  .note {
+    background: #fdf6e8; border-left: 3px solid var(--amber);
+    padding: 0.8rem 1rem; border-radius: 0 8px 8px 0; margin: 1rem 0;
+    font-size: 0.95rem;
+  }
+  .note strong { color: var(--amber); }
+
+  /* ---------- steps ---------- */
+  ol.steps { list-style: none; padding: 0; counter-reset: step; }
+  ol.steps > li {
+    counter-increment: step;
+    display: grid; grid-template-columns: 2.2rem 1fr; gap: 0.8rem;
+    margin-top: 1.3rem;
+  }
+  ol.steps > li::before {
+    content: counter(step);
+    font-family: ui-serif, "New York", Georgia, serif;
+    font-size: 1.3rem; font-weight: 600; color: var(--pine);
+    border-top: 2px solid var(--pine);
+    padding-top: 0.15rem;
+  }
+  ol.steps pre.term { margin: 0.6rem 0 0; }
+
+  /* ---------- command table ---------- */
+  .cmdtable { width: 100%; border-collapse: collapse; margin: 1rem 0; font-size: 0.93rem; }
+  .cmdtable th {
+    text-align: left; font-size: 0.72rem; letter-spacing: 0.1em; text-transform: uppercase;
+    color: var(--slate); padding: 0.5rem 0.75rem 0.4rem 0; border-bottom: 1.5px solid var(--ink);
+  }
+  .cmdtable td { padding: 0.55rem 0.75rem 0.55rem 0; border-bottom: 1px solid var(--hairline); vertical-align: top; }
+  .cmdtable td:first-child { white-space: nowrap; font-size: 0.84rem; }
+  .tablewrap { overflow-x: auto; }
+
+  /* ---------- signature: inspect/export flip ---------- */
+  .flip { background: var(--card); border: 1px solid var(--hairline); border-radius: 12px; padding: 1.4rem; margin: 1.4rem 0; }
+  .flip input { position: absolute; opacity: 0; pointer-events: none; }
+  .flip-labels { display: flex; gap: 0; border: 1.5px solid var(--ink); border-radius: 8px; overflow: hidden; width: max-content; margin-bottom: 1.1rem; }
+  .flip-labels label {
+    padding: 0.35rem 1.1rem; font-size: 0.85rem; font-weight: 600; cursor: pointer;
+    background: var(--card); color: var(--ink); transition: background 0.15s, color 0.15s;
+  }
+  @media (prefers-reduced-motion: reduce) { .flip-labels label { transition: none; } }
+  #mode-inspect:checked ~ .flip-labels label[for="mode-inspect"],
+  #mode-export:checked  ~ .flip-labels label[for="mode-export"] {
+    background: var(--ink); color: #fff;
+  }
+  .flip .row { display: none; }
+  #mode-inspect:checked ~ .row.inspect { display: block; }
+  #mode-export:checked  ~ .row.export  { display: block; }
+  .flip dl { display: grid; grid-template-columns: 7.5rem 1fr; row-gap: 0.45rem; font-size: 0.92rem; }
+  .flip dt { color: var(--slate); font-size: 0.78rem; letter-spacing: 0.08em; text-transform: uppercase; padding-top: 0.12rem; }
+  .flip dd { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 0.88rem; }
+  .mask { background: var(--ink); color: var(--ink); border-radius: 3px; padding: 0 0.15em; user-select: none; }
+  .flip .verdict { margin-top: 1rem; font-size: 0.88rem; color: var(--slate); }
+
+  /* ---------- privacy ledger ---------- */
+  .ledger { display: grid; gap: 0.9rem; margin-top: 1.1rem; }
+  .ledger .rule {
+    background: var(--card); border: 1px solid var(--hairline); border-radius: 10px;
+    padding: 0.9rem 1.1rem; display: grid; grid-template-columns: 3rem 1fr; gap: 0.9rem;
+  }
+  .ledger .rule b { font-family: ui-serif, "New York", Georgia, serif; font-size: 1.15rem; color: var(--pine); }
+  .ledger .rule p { font-size: 0.94rem; margin: 0; }
+
+  footer { border-top: 1px solid var(--hairline); padding: 2.2rem 0 3.5rem; color: var(--slate); font-size: 0.9rem; }
+  footer .wordmark::after { content: ""; }
+</style>
+</head>
+<body>
+
+<header class="wrap">
+  <div class="wordmark mono">trug</div>
+  <h1 class="display">Your iPhone's data. Your&nbsp;Mac. <em>Nowhere else.</em></h1>
+  <p class="lede">trug is a free, open-source command-line tool for macOS that backs up your iPhone
+  over USB and lets you read what's inside — your messages, contacts, call history, and notes —
+  as files you actually own. No cloud, no account, no telemetry. Everything happens on your Mac.</p>
+  <pre class="term"><span class="c"># the whole idea, in four commands</span>
+<span class="p">$</span> trug devices list          <span class="c"># see your connected iPhone</span>
+<span class="p">$</span> trug backup create &lt;udid&gt;  <span class="c"># back it up, locally</span>
+<span class="p">$</span> trug backup inspect &lt;udid&gt; messages   <span class="c"># redacted preview</span>
+<span class="p">$</span> trug backup export &lt;udid&gt; notes --out my-notes.json</pre>
+</header>
+
+<section class="wrap" id="what">
+  <div class="eyebrow">What it is</div>
+  <h2 class="display">A backup tool that answers to you</h2>
+  <p>Your iPhone can already back itself up to a Mac — but the result is a folder of hashed
+  files you can't read, made by tools you can't script. trug creates those same device backups
+  <em>and</em> gives you a window into them: a safe, redacted preview for browsing, and a full
+  export when you decide you want your data as ordinary JSON or CSV.</p>
+  <ul>
+    <li><strong>Local-only.</strong> trug talks to your phone over a USB cable and to your disk. It has no server, sends nothing anywhere, and collects nothing about you.</li>
+    <li><strong>Reads your own backups.</strong> Encrypted backups stay encrypted at rest; trug unlocks them only in memory, only when you provide your backup password.</li>
+    <li><strong>Scriptable.</strong> It's a real CLI with stable exit codes and machine-readable output — cron it, pipe it, build on it.</li>
+  </ul>
+  <p>Current status: <strong>alpha</strong> (v0.1.1-alpha). Backup creation, verification,
+  browsing, file extraction, encryption management, and inspect/export of four data stores are
+  in place. <strong>Restore is not yet supported</strong> — your existing Finder/iTunes restore
+  path is untouched.</p>
+</section>
+
+<section class="wrap" id="install">
+  <div class="eyebrow">Install</div>
+  <h2 class="display">One line with Homebrew</h2>
+  <pre class="term"><span class="p">$</span> brew install deaugarcon/tap/trug
+<span class="p">$</span> trug --version
+<span class="o">0.1.1-alpha</span></pre>
+  <p>Runs on macOS 14 (Sonoma) or later, Apple silicon and Intel. Building from source instead?
+  See <a href="https://github.com/deaugarcon/trug#build-dev">Build (dev) in the README</a> —
+  you'll need Xcode 16+ and Homebrew.</p>
+  <div class="note"><strong>macOS 27 beta:</strong> the Command Line Tools 27 beta ships a
+  SwiftPM defect that breaks source builds. Install full Xcode 27 beta and select it with
+  <code>sudo xcode-select -s /Applications/Xcode-beta.app/Contents/Developer</code> first.</div>
+</section>
+
+<section class="wrap" id="quickstart">
+  <div class="eyebrow">Quick start</div>
+  <h2 class="display">First backup to first export</h2>
+  <ol class="steps">
+    <li><div>
+      <h3>Plug in your iPhone and find it</h3>
+      <p>Connect over USB (unlock the phone and tap "Trust" if asked), then:</p>
+      <pre class="term"><span class="p">$</span> trug devices list</pre>
+      <p>You'll see your device's name and its UDID — the long identifier you'll pass to every
+      backup command. Add <code>--json</code> if you're scripting.</p>
+    </div></li>
+    <li><div>
+      <h3>Create a backup</h3>
+      <pre class="term"><span class="p">$</span> trug backup create &lt;udid&gt;</pre>
+      <p>The backup lands in trug's local store on your Mac. If your device has backup
+      encryption enabled (recommended — it's what makes saved passwords and health data
+      part of the backup), trug will need your backup password to read it later, never to
+      create it.</p>
+    </div></li>
+    <li><div>
+      <h3>Peek inside — safely</h3>
+      <pre class="term"><span class="p">$</span> trug backup inspect &lt;udid&gt; messages</pre>
+      <p><code>inspect</code> is read-only and deliberately blunted: rows are capped, names and
+      numbers are masked, text is truncated. It exists so you can confirm "yes, this backup has
+      what I think it has" without your data ever landing on screen in full.</p>
+    </div></li>
+    <li><div>
+      <h3>Export for real</h3>
+      <pre class="term"><span class="p">$</span> trug backup export &lt;udid&gt; notes --out my-notes.json
+<span class="p">$</span> trug backup export &lt;udid&gt; contacts --out contacts.csv --format csv</pre>
+      <p><code>export</code> writes the complete, unmasked store to a file you name. It's the
+      only command that writes your data to disk, it creates the file owner-read-only
+      (<code>0600</code>), and it refuses to overwrite an existing file unless you pass
+      <code>--force</code>.</p>
+    </div></li>
+  </ol>
+  <h3>Your backup password, when asked</h3>
+  <p>For encrypted backups, trug asks for the backup password with a silent prompt (nothing is
+  echoed). In scripts, set it via the environment instead — ideally straight from your
+  keychain so it never appears in your shell history:</p>
+  <pre class="term"><span class="p">$</span> TRUG_BACKUP_PASSWORD=$(security find-generic-password -s my-backup -w) \
+    trug backup export &lt;udid&gt; messages --out messages.json</pre>
+</section>
+
+<section class="wrap" id="commands">
+  <div class="eyebrow">Reference</div>
+  <h2 class="display">The command surface</h2>
+  <div class="tablewrap"><table class="cmdtable">
+    <tr><th>Command</th><th>What it does</th></tr>
+    <tr><td><code>trug devices list</code></td><td>Show connected iPhones with name and UDID. (Real identifiers, from your own attached hardware.)</td></tr>
+    <tr><td><code>trug backup create</code></td><td>Create a local backup of a connected device.</td></tr>
+    <tr><td><code>trug backup list</code></td><td>List backups in trug's local store.</td></tr>
+    <tr><td><code>trug backup verify</code></td><td>Check an existing backup's integrity.</td></tr>
+    <tr><td><code>trug backup browse</code></td><td>List the files inside a backup, optionally one domain.</td></tr>
+    <tr><td><code>trug backup extract</code></td><td>Pull one file out of a backup by path.</td></tr>
+    <tr><td><code>trug backup inspect</code></td><td>Redacted, capped, read-only preview of one store: <code>messages</code>, <code>contacts</code>, <code>calls</code>, or <code>notes</code>.</td></tr>
+    <tr><td><code>trug backup export</code></td><td>Full, unmasked export of one store as JSON (default) or CSV, to a file you name with <code>--out</code>.</td></tr>
+    <tr><td><code>trug backup encryption</code></td><td>Turn device backup encryption on, or rotate the password (<code>TRUG_BACKUP_NEW_PASSWORD</code> for scripting).</td></tr>
+  </table></div>
+  <p>Every subcommand has full help: <code>trug help backup export</code>.</p>
+</section>
+
+<section class="wrap" id="inspect-vs-export">
+  <div class="eyebrow">The core idea</div>
+  <h2 class="display">Inspect shows shapes. Export shows everything.</h2>
+  <p>The same message row, through each door — flip it yourself:</p>
+  <div class="flip">
+    <input type="radio" name="mode" id="mode-inspect" checked>
+    <input type="radio" name="mode" id="mode-export">
+    <div class="flip-labels" role="group" aria-label="Choose view">
+      <label for="mode-inspect">inspect</label>
+      <label for="mode-export">export</label>
+    </div>
+    <div class="row inspect">
+      <dl>
+        <dt>from</dt><dd>A<span class="mask">da Lovelace</span></dd>
+        <dt>number</dt><dd>+1 ••• ••<span class="mask">5</span>42</dd>
+        <dt>date</dt><dd>2026-06-14 09:31</dd>
+        <dt>text</dt><dd>Landing at 4 — can you grab the…</dd>
+      </dl>
+      <p class="verdict">Masked sender, masked number, text truncated at 40 characters, row count
+      capped at the database layer. Nothing to shoulder-surf.</p>
+    </div>
+    <div class="row export">
+      <dl>
+        <dt>from</dt><dd>Ada Lovelace</dd>
+        <dt>number</dt><dd>+1 555 010 5542</dd>
+        <dt>date</dt><dd>2026-06-14 09:31</dd>
+        <dt>text</dt><dd>Landing at 4 — can you grab the analytical engine from the shop?</dd>
+      </dl>
+      <p class="verdict">The complete record, in a <code>0600</code> file, at a path you chose,
+      only because you asked. (Example data is synthetic.)</p>
+    </div>
+  </div>
+  <h3>Notes get their full body — with two honest exceptions</h3>
+  <p>Since v0.1.1, <code>export notes</code> includes each note's complete decoded text
+  (<code>schema_version: 2</code>). Two rules keep it honest:</p>
+  <ul>
+    <li>A <strong>locked</strong> (password-protected) note's body is withheld as an empty
+    string. trug never attempts to decode locked content.</li>
+    <li>A body trug cannot decode is <strong>omitted</strong> — never guessed, and never the
+    reason an export fails. You still get the note's title and metadata.</li>
+  </ul>
+  <h3>CSV that won't bite back</h3>
+  <p>CSV exports are RFC-4180 quoted, and any field starting with <code>=</code>, <code>+</code>,
+  <code>-</code>, <code>@</code>, or a tab/CR/LF is neutralized so a message that says
+  "=SUM(…)" opens in your spreadsheet as text, not as a formula.</p>
+</section>
+
+<section class="wrap" id="privacy">
+  <div class="eyebrow">Privacy model</div>
+  <h2 class="display">Four rules the code is built around</h2>
+  <div class="ledger">
+    <div class="rule"><b>P1</b><p>No decrypted working file survives. Anything trug decrypts to
+    read goes into an owner-only temp file that is removed when the command exits — normally
+    or on error.</p></div>
+    <div class="rule"><b>P2</b><p>Every run starts with a sweep. Before touching your data,
+    trug scrubs any stale working files a previous crash might have left behind.</p></div>
+    <div class="rule"><b>P3</b><p>The preview is blunted at the source. <code>inspect</code>'s
+    caps and masks are applied in the database query itself — full rows never reach the
+    display code.</p></div>
+    <div class="rule"><b>P4</b><p>One door for output. <code>export</code> is the only path
+    that writes your data to disk: explicit <code>--out</code>, owner-read-only permissions,
+    no silent overwrites, no symlink tricks.</p></div>
+  </div>
+  <p style="margin-top:1rem">Your backup password is never stored by trug and never appears in
+  any file it writes. Full details in
+  <a href="https://github.com/deaugarcon/trug/blob/main/SECURITY.md">SECURITY.md</a>.</p>
+</section>
+
+<section class="wrap" id="limits">
+  <div class="eyebrow">Good to know</div>
+  <h2 class="display">Current limits, plainly</h2>
+  <ul>
+    <li><strong>No restore yet.</strong> trug creates and reads backups; restoring one to a phone is planned, not shipped.</li>
+    <li><strong>USB is the supported path.</strong> Wi-Fi device info is experimental.</li>
+    <li><strong>Validated on iOS 27.</strong> Older iOS versions (e.g. iOS 18) should work but carry a caveat until device-verified.</li>
+    <li><strong>Four stores today.</strong> Messages, contacts, call history, notes. Photos and other domains: <code>backup browse</code> + <code>backup extract</code> can pull raw files in the meantime.</li>
+    <li><strong>Alpha means alpha.</strong> Interfaces may still move; the changelog and releases page tell the truth: <a href="https://github.com/deaugarcon/trug/releases">releases</a>.</li>
+  </ul>
+</section>
+
+<footer>
+  <div class="wrap">
+    <div class="wordmark mono">trug</div>
+    <p style="margin-top:0.5rem">Free and open source, MIT licensed.
+    <a href="https://github.com/deaugarcon/trug">Source</a> ·
+    <a href="https://github.com/deaugarcon/trug/blob/main/README.md">README</a> ·
+    <a href="https://github.com/deaugarcon/trug/blob/main/SECURITY.md">Security &amp; privacy</a> ·
+    <a href="https://github.com/deaugarcon/trug/issues">Report an issue</a></p>
+    <p style="margin-top:0.5rem">Made for people who think their own data should be theirs to read.</p>
+  </div>
+</footer>
+
+</body>
+</html>
