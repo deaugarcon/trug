@@ -1,0 +1,40 @@
+WP4 keybag + decryptor + encrypted-Manifest cross-validation transcript
+Generated: 2026-06-11T19:36:44Z
+Independent oracle: Scripts/wp4-keybag-oracle.py (Python stdlib PBKDF2 + OpenSSL libcrypto AES via ctypes)
+Code under test:    Sources/BackupCore/{Keybag,BackupDecryptor,ManifestReader}.swift (CommonCrypto)
+Shared code: NONE (different crypto stacks) — defeats the self-referential-fixture risk (wp4.design.odb.md R1).
+
+== Oracle selftest ==
+selftest OK: corrected-order KEK wrap/unwrap round-trips; wrong password rejects all classes; per-file unwrap+CBC+PKCS7 recovers the known plaintext; ManifestKey unwrap + manifest CBC zero-IV round-trips
+
+== Oracle emission ==
+emitted 500 TLV bytes; sha256=407ed8e2254ab4fbd9150770de8fe167355a837e76a5d955198770940edbabb8
+passcode classes: [3, 4]
+device-only (host-skipped) classes: [11]
+encrypted file: class 3, 64B ciphertext, 62B bplist plaintext
+manifest key: class 4, 44B ManifestKey blob
+
+== Fixture checksums ==
+407ed8e2254ab4fbd9150770de8fe167355a837e76a5d955198770940edbabb8  Tests/Fixtures/wp4/keybag.tlv
+dec54f63a7d26d78a848267484349d4b65ddeb6f25521d1c0adb50a2af87412e  Tests/Fixtures/wp4/encfile.ciphertext
+c954462c85dacbe319478335633d5ee7fda2fe8f4494da2ad713fd3f1b6cb846  Tests/Fixtures/wp4/encfile.plaintext
+
+== ManifestKey wire shape (Odb spot-check ruling, task #11) ==
+ManifestKey class prefix is LITTLE-ENDIAN (iOSbackup '<l', dunhamsteve LittleEndian.Uint32) —
+  the OPPOSITE of the keybag TLV's big-endian integers. Fixture prefix bytes for class 4:
+    04000000 (04 00 00 00 = LE class 4)
+Manifest.db decrypt is FULL-BUFFER, no PKCS7 strip/throw, no size-truncate (strict PKCS7 =
+  MVT #93/#571 false failures). Success asserted by SQLite-open + Files-read, not padding.
+
+== Swift cross-validation results ==
+KeybagTests.recoveredClassKeysMatchIndependentOracle: class keys recovered byte-for-byte.
+BackupDecryptorTests.decryptsKnownFileToExpectedPlaintext: per-file chain recovers the plaintext.
+EncryptedManifestTests: encrypted Manifest.db decrypts/opens/crypto-verifies/extracts;
+  manifestKeyPrefixIsLittleEndian pins the LE wire bytes; bigEndianPrefixManifestKeyFailsToOpen
+  proves the decode is LE-sensitive; opensZeroPaddedEncryptedManifest proves no PKCS7 requirement;
+  wrong password -> wrongPassword not manifestUnreadable.
+
+NON-VACUITY (verified this session): shared BE assumption (oracle+reader both BE) keeps the
+  round-trip GREEN but manifestKeyPrefixIsLittleEndian + bigEndianPrefixManifestKeyFailsToOpen
+  go RED; reverting the manifest decrypt to PKCS7-strip makes opensZeroPaddedEncryptedManifest
+  throw .badPadding. Apple-correctness of the wire shape still rests on device checkpoint C.

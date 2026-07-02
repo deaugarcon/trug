@@ -1,0 +1,5 @@
+module Cplist [system] {
+    header "shim.h"
+    link "plist-2.0"
+    export *
+}

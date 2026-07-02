@@ -1,0 +1,6 @@
+# Pinned C dependency refs. Update deliberately; CI cache keys off this file.
+LIBPLIST_REF="2.7.0"
+GLUE_REF="1.3.2"
+LIBUSBMUXD_REF="2.1.1"
+LIBTATSU_REF="1.0.5"
+LIBIMOBILEDEVICE_REF="fa0f79190142bc309307967c058f89c1b36eb6b8" # upstream commit date: 2026-06-10

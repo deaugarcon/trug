@@ -1,0 +1,11 @@
+trug dynamically links the following LGPL-2.1+ libraries, built from
+pinned source by Scripts/build-deps.sh (versions in Scripts/deps.lock):
+
+  libimobiledevice        https://github.com/libimobiledevice/libimobiledevice
+  libusbmuxd              https://github.com/libimobiledevice/libusbmuxd
+  libimobiledevice-glue   https://github.com/libimobiledevice/libimobiledevice-glue
+  libplist                https://github.com/libimobiledevice/libplist
+
+Per LGPL-2.1 §6: these libraries are dynamically linked and replaceable;
+build scripts to rebuild and relink them are published in this repository.
+OpenSSL 3 (Apache-2.0) is used as the TLS backend.
