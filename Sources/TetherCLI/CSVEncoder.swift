@@ -36,8 +36,11 @@ extension CallRow: CSVRow {
 }
 
 extension NoteRow: CSVRow {
-    static var csvHeader: [String] { ["title", "snippet", "created", "modified", "folder"] }
-    var csvFields: [String?] { [title, snippet, created, modified, folder] }
+    // SP3.2 appends `body` LAST (== JSON CodingKeys order). The unchanged `CSVEncoder` neutralizes a
+    // body leading with a formula trigger and quotes any comma/quote/CRLF; a withheld ""/absent nil both
+    // render as an empty field (the §5.3 null-vs-empty lossiness — JSON stays the lossless format).
+    static var csvHeader: [String] { ["title", "snippet", "created", "modified", "folder", "body"] }
+    var csvFields: [String?] { [title, snippet, created, modified, folder, body] }
 }
 
 /// A pure, deterministic RFC-4180 CSV encoder with K6 formula-injection neutralization. No I/O, no

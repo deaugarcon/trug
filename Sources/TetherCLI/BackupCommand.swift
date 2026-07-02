@@ -377,11 +377,12 @@ struct Backup: ParsableCommand {
         static let configuration = CommandConfiguration(
             abstract: "Export one store (messages | contacts | calls | notes) as JSON (default) or CSV — full and unmasked.",
             discussion: """
-                Scope: messages, contacts, and calls export their full LOCKED field set. `notes` is a \
-                title/metadata PREVIEW — title, snippet, created, modified, and folder; the note BODY is \
-                NOT included in schema_version 1 (a planned follow-on, SP3.2, adds the decoded body). So \
-                "full and unmasked" means every field the store exposes at v1, which for notes excludes \
-                the body.
+                Scope: messages, contacts, and calls export their full LOCKED field set at \
+                schema_version 1. `notes` exports at schema_version 2 and ADDS the decoded note `body` \
+                to the title/metadata fields (title, snippet, created, modified, folder). A locked \
+                (password-protected) note's body is WITHHELD as an empty string; a body that cannot be \
+                decoded is OMITTED (its key is absent), never guessed. "Full and unmasked" means every \
+                field the store exposes at its schema_version.
                 """)
 
         /// The in-scope stores (§3, SP3.1 §2.1). Its OWN enum (a duplicate of `Inspect.Store`, odb
@@ -401,7 +402,7 @@ struct Backup: ParsableCommand {
         }
 
         @Argument(help: "Backup UDID.") var udid: String
-        @Argument(help: "Store to export: messages | contacts | calls | notes (notes = title/metadata preview; note body NOT included in v1, see SP3.2).") var store: Store
+        @Argument(help: "Store to export: messages | contacts | calls | notes (notes ships the decoded body at schema_version 2; locked-note body withheld as \"\").") var store: Store
         @Option(name: .long, help: "Output file.") var out: String
         @Flag(name: .long, help: "Overwrite the output file if it already exists.") var force = false
         @Option(name: .long, help: """
@@ -462,12 +463,16 @@ struct Backup: ParsableCommand {
         /// exit codes are untouched — an unknown `--format` is an ArgumentParser usage error, not an
         /// engine exit. `static` so it is unit-testable without driving `run()` (which resolves
         /// `.defaultRoot`).
-        static func emit<Row: Encodable & CSVRow>(
+        static func emit<Row: Encodable & CSVRow & ExportSchemaVersioned>(
             _ rows: [Row], store: String, format: Format, to out: String, force: Bool
         ) throws {
             switch format {
             case .json:
-                try writeJSON(ExportEnvelope(store: store, rows: rows), to: out, force: force)
+                // The per-store `schema_version` is carried at the row TYPE (SP3.2): notes → 2, others
+                // → 1. Passed into `ExportEnvelope`'s existing defaulted param, so ExportEnvelope stays
+                // frozen. CSV has no envelope (§5.4), so the version applies to the JSON arm only.
+                try writeJSON(ExportEnvelope(store: store, schemaVersion: Row.exportSchemaVersion, rows: rows),
+                              to: out, force: force)
             case .csv:
                 try writeCSV(header: Row.csvHeader, rows: rows.map(\.csvFields), to: out, force: force)
             }

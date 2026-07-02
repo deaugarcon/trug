@@ -1,6 +1,7 @@
 import Foundation
 import CryptoKit
 import CommonCrypto
+import Compression
 import SQLite3
 @testable import BackupCore
 
@@ -505,6 +506,14 @@ enum FixtureBuilder {
     /// a NULL date (the M1 case), a genuine `0` seeds the real 2001 epoch. `folderName` places the note
     /// in a title-bearing folder row via the `ZFOLDER` self-join (nil → unfiled). `locked` seeds a
     /// `ZISPASSWORDPROTECTED = 1` shape so the B6 locked-note snippet-leak check is fixture-representable.
+    ///
+    /// SP3.2 body seeding (all synthetic, §9): when `body` is set, `noteStoreBytes` inserts a
+    /// `ZICNOTEDATA(ZNOTE, ZDATA)` row whose ZDATA is `gzip(noteProtoBytes(text: body))`. When
+    /// `rawZDataOverride` is set, that raw byte string is stored as ZDATA verbatim (models ciphertext or
+    /// a corrupt/undecodable blob — the fail-closed backstop, Odb F5). `extraZData` seeds ADDITIONAL
+    /// `ZICNOTEDATA` rows for the SAME note (higher `Z_PK`) so the correlated-subquery de-fan can be
+    /// proven with no row fan-out (Odb F1). When all three are nil/empty the note has no `ZICNOTEDATA`
+    /// row at all (the absent → nil case).
     struct SeededNote {
         let title: String?
         let snippet: String?
@@ -512,6 +521,19 @@ enum FixtureBuilder {
         let modifiedAppleEpochSeconds: Int?   // ZMODIFICATIONDATE1 (nil seeds NULL — M1)
         let folderName: String?               // resolved via the ZFOLDER self-join (nil → no folder)
         let locked: Bool                      // ZISPASSWORDPROTECTED shape (locked-note B6 check)
+        let body: String?                     // SP3.2 — ZDATA = gzip(proto(body)) when set
+        let rawZDataOverride: Data?           // SP3.2 — ZDATA = these raw bytes verbatim (ciphertext/corrupt)
+        let extraZData: [Data]                // SP3.2 — additional same-note ZICNOTEDATA rows (fan-out proof)
+
+        init(title: String?, snippet: String?, createdAppleEpochSeconds: Int?,
+             modifiedAppleEpochSeconds: Int?, folderName: String?, locked: Bool,
+             body: String? = nil, rawZDataOverride: Data? = nil, extraZData: [Data] = []) {
+            self.title = title; self.snippet = snippet
+            self.createdAppleEpochSeconds = createdAppleEpochSeconds
+            self.modifiedAppleEpochSeconds = modifiedAppleEpochSeconds
+            self.folderName = folderName; self.locked = locked
+            self.body = body; self.rawZDataOverride = rawZDataOverride; self.extraZData = extraZData
+        }
     }
 
     /// Builds a synthetic `sms.db` (`message` + `handle` + `chat` + `chat_message_join`, the §7 join
@@ -685,8 +707,9 @@ enum FixtureBuilder {
     /// at Z_ENT 11** (the code a hardcoded reader matched) so the entity discriminator — NOT
     /// title-nullness — does the filtering; the K4 folder self-join resolves a note's folder NAME from
     /// its folder row's `ZTITLE1`. Dates are stored as REAL seconds so the CAST+seconds normalizer is
-    /// exercised on the real Core Data storage class. A `ZICNOTEDATA` body table is seeded schema-only
-    /// (NOT read in the alpha — body deferred to SP3.2). ALL rows are seeded/fake (§9).
+    /// exercised on the real Core Data storage class. The `ZICNOTEDATA` body table (SP3.2) is seeded
+    /// with a `(ZNOTE, ZDATA)` row per note that carries a `body`/`rawZDataOverride`/`extraZData`. ALL
+    /// rows are seeded/fake (§9).
     static func noteStoreBytes(notes: [SeededNote]) throws -> Data {
         let tmp = URL.temporaryTestDir().appendingPathComponent("notes-\(UUID().uuidString).sqlite")
         defer { try? FileManager.default.removeItem(at: tmp.deletingLastPathComponent()) }
@@ -731,16 +754,135 @@ enum FixtureBuilder {
         pk += 1
         try insertSyncingObject(db, pk: pk, ent: icMediaEntityCode, title: nil, snippet: nil,
                                 createdSeconds: nil, modifiedSeconds: nil, folderPK: nil, locked: false)
-        // 4) The NOTE rows themselves (Z_ENT = ICNote), each linked to its folder row (if any).
+        // 4) The NOTE rows themselves (Z_ENT = ICNote), each linked to its folder row (if any), plus
+        //    the SP3.2 ZICNOTEDATA body row(s) when the note seeds a body/override/extra.
         for n in notes {
             pk += 1
-            try insertSyncingObject(db, pk: pk, ent: icNoteEntityCode, title: n.title, snippet: n.snippet,
+            let notePK = pk
+            try insertSyncingObject(db, pk: notePK, ent: icNoteEntityCode, title: n.title, snippet: n.snippet,
                                     createdSeconds: n.createdAppleEpochSeconds,
                                     modifiedSeconds: n.modifiedAppleEpochSeconds,
                                     folderPK: n.folderName.flatMap { folderPK[$0] }, locked: n.locked)
+            // The primary body row (inserted FIRST → lowest ZICNOTEDATA.Z_PK, so the reader's
+            // `ORDER BY d.Z_PK ASC LIMIT 1` deterministically selects it over any `extraZData` sibling).
+            if let raw = n.rawZDataOverride {
+                try insertNoteData(db, znote: notePK, zdata: raw)
+            } else if let body = n.body {
+                try insertNoteData(db, znote: notePK, zdata: Data(gzip(noteProtoBytes(text: body))))
+            }
+            // Any additional same-note rows (higher Z_PK) — used only to prove the subquery de-fans.
+            for extra in n.extraZData {
+                try insertNoteData(db, znote: notePK, zdata: extra)
+            }
         }
         sqlite3_close(db); db = nil
         return try Data(contentsOf: tmp)
+    }
+
+    /// Inserts one `ZICNOTEDATA(ZNOTE, ZDATA)` body row (SP3.2). `ZDATA` is bound as a BLOB; `Z_PK`
+    /// auto-increments so insertion order fixes the `ORDER BY d.Z_PK ASC` tie-break.
+    private static func insertNoteData(_ db: OpaquePointer?, znote: Int, zdata: Data) throws {
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, "INSERT INTO ZICNOTEDATA(ZNOTE, ZDATA) VALUES (?, ?)", -1, &stmt, nil) == SQLITE_OK else {
+            throw FixtureError.sqlite("prepare note-data insert failed")
+        }
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_int64(stmt, 1, Int64(znote))
+        _ = zdata.withUnsafeBytes { sqlite3_bind_blob(stmt, 2, $0.baseAddress, Int32(zdata.count), SQLITE_TRANSIENT) }
+        guard sqlite3_step(stmt) == SQLITE_DONE else {
+            throw FixtureError.sqlite("step note-data insert failed for note \(znote)")
+        }
+    }
+
+    // MARK: - SP3.2 synthetic gzip + note-store protobuf builders (§9 — all invented content)
+
+    /// Builds the minimal Apple "note store" protobuf carrying `text` at the LOCKED field path
+    /// `{document=2 {note=3 {note_text=2: text}}}`. When `includeAttributeRun` is set, a sibling
+    /// `attribute_run` (field 5) is appended AFTER `note_text` so the decoder's first-match walk can be
+    /// proven to return the text and ignore field 5 (Odb F6). Pure byte assembly, no real content.
+    static func noteProtoBytes(text: String, includeAttributeRun: Bool = false) -> [UInt8] {
+        var note = lengthDelimited(field: 2, payload: Array(text.utf8))          // Note.note_text
+        if includeAttributeRun {
+            note += lengthDelimited(field: 5, payload: [0x08, 0x01])             // a skipped sibling
+        }
+        let document = lengthDelimited(field: 3, payload: note)                  // Document.note
+        return lengthDelimited(field: 2, payload: document)                      // NoteStoreProto.document
+    }
+
+    /// Wraps `data` in a synthetic gzip member (RFC 1952): a flag-driven header (FLG derived from the
+    /// optional `extra`/`filename` fields so the decoder's flag-driven parse can be exercised, not just
+    /// a fixed 10-byte header), a raw-DEFLATE body (Apple `COMPRESSION_ZLIB` is raw DEFLATE), and a
+    /// CRC32 + ISIZE little-endian trailer. Symmetric with `NoteBodyDecoder.gunzip`.
+    static func gzip(_ data: [UInt8], filename: String? = nil, extra: [UInt8]? = nil) -> [UInt8] {
+        var flg: UInt8 = 0
+        if extra != nil { flg |= 0x04 }        // FEXTRA
+        if filename != nil { flg |= 0x08 }     // FNAME
+        // ID1 ID2 CM FLG MTIME(4) XFL OS — OS 0xFF = unknown.
+        var out: [UInt8] = [0x1f, 0x8b, 0x08, flg, 0, 0, 0, 0, 0, 0xFF]
+        if let extra {
+            out += [UInt8(extra.count & 0xFF), UInt8((extra.count >> 8) & 0xFF)]   // XLEN (LE)
+            out += extra
+        }
+        if let filename {
+            out += Array(filename.utf8) + [0]                                      // zero-terminated
+        }
+        out += deflate(data)
+        out += leBytes(crc32(data))
+        out += leBytes(UInt32(truncatingIfNeeded: data.count))                     // ISIZE mod 2^32
+        return out
+    }
+
+    /// Raw DEFLATE of `data` via `compression_encode_buffer(COMPRESSION_ZLIB)` (raw DEFLATE on Apple
+    /// platforms). Empty input returns the canonical empty DEFLATE block.
+    private static func deflate(_ data: [UInt8]) -> [UInt8] {
+        guard !data.isEmpty else { return [0x03, 0x00] }
+        let capacity = data.count + 64
+        var dst = [UInt8](repeating: 0, count: capacity)
+        let written = dst.withUnsafeMutableBufferPointer { dstBuf -> Int in
+            guard let dstBase = dstBuf.baseAddress else { return 0 }
+            return data.withUnsafeBufferPointer { srcBuf -> Int in
+                guard let srcBase = srcBuf.baseAddress else { return 0 }
+                return compression_encode_buffer(dstBase, capacity, srcBase, data.count, nil, COMPRESSION_ZLIB)
+            }
+        }
+        return Array(dst[0..<written])
+    }
+
+    /// Standard reflected CRC-32 (gzip polynomial 0xEDB88320) — makes the trailer a REAL gzip CRC so a
+    /// fixture member also validates under `gunzip(1)` for B6 cross-checking.
+    private static func crc32(_ data: [UInt8]) -> UInt32 {
+        var crc: UInt32 = 0xFFFFFFFF
+        for byte in data {
+            crc ^= UInt32(byte)
+            for _ in 0..<8 {
+                crc = (crc & 1) != 0 ? (crc >> 1) ^ 0xEDB88320 : crc >> 1
+            }
+        }
+        return crc ^ 0xFFFFFFFF
+    }
+
+    /// A length-delimited (wire type 2) protobuf field: tag varint + length varint + payload.
+    private static func lengthDelimited(field: Int, payload: [UInt8]) -> [UInt8] {
+        varint(UInt64(field << 3 | 2)) + varint(UInt64(payload.count)) + payload
+    }
+
+    /// Base-128 varint encoding (little-endian groups, high bit = continuation).
+    private static func varint(_ value: UInt64) -> [UInt8] {
+        var v = value
+        var out: [UInt8] = []
+        repeat {
+            var byte = UInt8(v & 0x7F)
+            v >>= 7
+            if v != 0 { byte |= 0x80 }
+            out.append(byte)
+        } while v != 0
+        return out
+    }
+
+    /// Little-endian 4-byte encoding of a `UInt32` (gzip trailer byte order).
+    private static func leBytes(_ value: UInt32) -> [UInt8] {
+        [UInt8(value & 0xFF), UInt8((value >> 8) & 0xFF),
+         UInt8((value >> 16) & 0xFF), UInt8((value >> 24) & 0xFF)]
     }
 
     /// Inserts one `ZICCLOUDSYNCINGOBJECT` row with per-column NULL handling: nil title/snippet →

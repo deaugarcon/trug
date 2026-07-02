@@ -77,28 +77,34 @@ public struct CallRow: Codable, Equatable {
     }
 }
 
-/// A single note row, per the LOCKED SP3.1 §4.4 minimum plus the K4-ratified `folder`. This is the
-/// K3-RATIFIED **title/metadata preview scope**: `ZSNIPPET` is Apple's own PLAINTEXT preview, so the
-/// record is decode-free. There is deliberately **NO `body` field in schema_version 1** — not even a
-/// `null` placeholder — because advertising a `body` key the reader cannot populate would over-claim
-/// preview scope (the full gzip-protobuf body is a named SP3.2 follow-on that bumps schema_version → 2).
-/// Field names already match §4.4, so no `CodingKeys` remap.
+/// A single note row, per the LOCKED SP3.1 §4.4 minimum plus the K4-ratified `folder`, EXTENDED by
+/// SP3.2 with the decoded `body`. `ZSNIPPET` is Apple's own PLAINTEXT preview; `body` is the full note
+/// text decoded from `ZICNOTEDATA.ZDATA` (gzip-compressed "note store" protobuf) via `NoteBodyDecoder`.
+/// Carrying `body` is what bumps the notes export `schema_version` → 2 (spec §10.2/§10.3). Field names
+/// already match §4.4/§10.3, so no `CodingKeys` remap.
 ///
 /// `created`/`modified` are OPTIONAL by the same M1 marshal contract as `CallRow.date` (Odb M1, §G):
 /// a NULL `ZCREATIONDATE1`/`ZMODIFICATIONDATE1` surfaces as `nil` (key omitted), NEVER a fabricated
 /// `2001-01-01T00:00:00Z`; a genuine stored `0` IS the real 2001 epoch. This deviates from the SOLVE
 /// §B.1 sketch's non-optional dates exactly as B3's `date` did, under the same §G disposition.
+///
+/// `body` carries a two-valued absence contract (SP3.2 §3.6): `nil` = absent/undecodable — either no
+/// `ZICNOTEDATA` row or a fail-closed decode failure (M1-parallel: the key is omitted via the
+/// synthesized `encodeIfPresent`); `""` = deliberately withheld (a locked note, M2-parallel: the SQL
+/// layer NULLs the bytes and the marshal returns "" before any decode). The two are kept distinct so a
+/// decode failure never masquerades as a deliberate withhold.
 public struct NoteRow: Codable, Equatable {
     public let title: String?       // ZTITLE1
     public let snippet: String?     // ZSNIPPET — Apple's own PLAINTEXT preview (no protobuf decode)
     public let created: String?     // ISO-8601 via CoreDataDateNormalizer (SECONDS); nil on NULL (M1)
     public let modified: String?    // ISO-8601 via CoreDataDateNormalizer (SECONDS); nil on NULL (M1)
     public let folder: String?      // K4 — folder name via the ZFOLDER self-join; nil when unfiled
+    public let body: String?        // SP3.2 — decoded note text; nil=absent/undecodable, ""=withheld/locked
 
     public init(title: String?, snippet: String?, created: String?,
-                modified: String?, folder: String?) {
+                modified: String?, folder: String?, body: String? = nil) {
         self.title = title; self.snippet = snippet; self.created = created
-        self.modified = modified; self.folder = folder
+        self.modified = modified; self.folder = folder; self.body = body
     }
 }
 
@@ -186,14 +192,28 @@ public struct BackupRowReader {
                         domain: Self.Schema.notesDomain, path: Self.Schema.notesPath,
                         sql: sql) { row in
             // created/modified read via `text(i)` over the CAST columns so a SQL NULL surfaces nil
-            // (M1) — `int(i)` would coerce NULL→0 and forge the 2001 epoch.
+            // (M1) — `int(i)` would coerce NULL→0 and forge the 2001 epoch. body (SP3.2) reads the
+            // locked flag (col 5) and the withheld-or-decoded bytes (col 6) via `noteBody`.
             NoteRow(
                 title: row.text(0),
                 snippet: row.text(1),
                 created: CoreDataDateNormalizer.normalize(appleEpochSeconds: row.text(2).flatMap { Int($0) }),
                 modified: CoreDataDateNormalizer.normalize(appleEpochSeconds: row.text(3).flatMap { Int($0) }),
-                folder: row.text(4))
+                folder: row.text(4),
+                body: Self.noteBody(locked: row.int(5) == 1, zdata: row.blob(6)))
         }
+    }
+
+    /// Maps a note's locked flag + body bytes to the SP3.2 `NoteRow.body` contract (§3.6):
+    /// - locked → `""` (M2-parallel withhold; the SQL CASE has already NULLed the bytes, so this is a
+    ///   defense-in-depth backstop that returns the withhold BEFORE consulting `zdata`);
+    /// - no `ZICNOTEDATA` row / NULL bytes → `nil` (M1-parallel absent; the key is omitted on encode);
+    /// - present bytes → the fail-closed decode: decoded plaintext, or `nil` when undecodable.
+    /// `NoteBodyDecoder` never throws, so a bad row can never abort the read.
+    private static func noteBody(locked: Bool, zdata: Data?) -> String? {
+        if locked { return "" }
+        guard let zdata else { return nil }
+        return NoteBodyDecoder.decodedText(zdata)
     }
 
     // MARK: Materialize + read (mirrors BackupVerifier.openTableNames)
@@ -375,10 +395,20 @@ public struct BackupRowReader {
         static let notesDomain = "AppDomainGroup-group.com.apple.notes"   // device-verify(B6)
         static let notesPath = "NoteStore.sqlite"                         // device-verify(B6)
 
-        /// The LOCKED §4.4 preview SELECT + K4 folder self-join. Column order MUST match `notes(...)`:
-        /// 0 ZTITLE1, 1 ZSNIPPET, 2 CAST(ZCREATIONDATE1 AS INTEGER), 3 CAST(ZMODIFICATIONDATE1 AS INTEGER),
-        /// 4 f.ZTITLE1 (folder name). Dates are Core Data REAL seconds — CAST AS INTEGER (same as calls)
+        /// The LOCKED §4.4 preview SELECT + K4 folder self-join, EXTENDED by SP3.2 with the note body.
+        /// Column order MUST match `notes(...)`: 0 ZTITLE1, 1 ZSNIPPET, 2 CAST(ZCREATIONDATE1 AS INTEGER),
+        /// 3 CAST(ZMODIFICATIONDATE1 AS INTEGER), 4 f.ZTITLE1 (folder name), 5 ZISPASSWORDPROTECTED
+        /// (locked flag), 6 body bytes. Dates are Core Data REAL seconds — CAST AS INTEGER (same as calls)
         /// and read via text() so a NULL date surfaces nil, never a forged epoch (M1).
+        ///
+        /// SP3.2 body columns are ADDITIVE — the M1 entity WHERE, the M2 snippet CASE, and the ORDER BY
+        /// stay byte-identical. Col 6 is a CORRELATED SCALAR SUBQUERY over `ZICNOTEDATA` (the house idiom
+        /// used for contacts primary_phone/email), NOT a LEFT JOIN: `ZICNOTEDATA.ZNOTE` is a non-unique
+        /// FK, so a join could fan a note out into N rows (Odb F1). The subquery's `ORDER BY d.Z_PK ASC
+        /// LIMIT 1` guarantees exactly one body per note regardless of cardinality, so the note row count
+        /// is provably identical to v1. The locked→NULL withhold lives INSIDE the CASE (M2-parallel to the
+        /// snippet CASE), so a locked note's ZDATA bytes never leave the SQL layer. `ZICNOTEDATA`/`ZNOTE`/
+        /// `ZDATA` are device-verify(B6), isolated here for a localized rebind.
         static func notesSelect(limit: Int?) -> String {
             // Discriminator (Odb H1): the NOTE entity is resolved AT RUNTIME BY NAME from the Core Data
             // `Z_PRIMARYKEY` catalog — NOT a hardcoded integer, NOT `ZTITLE1 IS NOT NULL`. Core Data
@@ -399,7 +429,11 @@ public struct BackupRowReader {
                    CASE WHEN o.ZISPASSWORDPROTECTED = 1 THEN '' ELSE o.ZSNIPPET END AS ZSNIPPET,
                    CAST(o.ZCREATIONDATE1 AS INTEGER)     AS created_s,
                    CAST(o.ZMODIFICATIONDATE1 AS INTEGER) AS modified_s,
-                   f.ZTITLE1 AS folder
+                   f.ZTITLE1 AS folder,
+                   o.ZISPASSWORDPROTECTED AS locked,
+                   CASE WHEN o.ZISPASSWORDPROTECTED = 1 THEN NULL
+                        ELSE (SELECT d.ZDATA FROM ZICNOTEDATA AS d
+                               WHERE d.ZNOTE = o.Z_PK ORDER BY d.Z_PK ASC LIMIT 1) END AS body
             FROM ZICCLOUDSYNCINGOBJECT AS o
             LEFT JOIN ZICCLOUDSYNCINGOBJECT AS f ON o.ZFOLDER = f.Z_PK
             WHERE o.Z_ENT = (SELECT Z_ENT FROM Z_PRIMARYKEY WHERE Z_NAME = 'ICNote')

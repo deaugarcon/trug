@@ -40,12 +40,16 @@ import BackupCore
     }
     static var seededNotes: [NoteRow] {
         [
-            // dash-leading title (M4) + comma-containing snippet.
+            // dash-leading title (M4) + comma-containing snippet; nil body → empty trailing CSV field.
             NoteRow(title: "- shopping list", snippet: "milk, eggs",
                     created: "2026-05-30T14:00:00Z", modified: "2026-06-13T08:12:00Z", folder: "Shopping"),
-            // @-leading title (M4) + quote-containing snippet + nil folder.
+            // @-leading title (M4) + quote-containing snippet + nil folder; nil body.
             NoteRow(title: "@mentions", snippet: "say \"hi\"",
                     created: "2026-04-02T19:20:00Z", modified: "2026-06-01T21:05:00Z", folder: nil),
+            // SP3.2 body exercising comma + quote + newline + a leading `=` formula trigger through the
+            // UNCHANGED encoder: K6 prepends `'`, then RFC-4180 quotes and doubles the internal quotes.
+            NoteRow(title: "Recipe", snippet: "s", created: "2026-01-02T00:00:00Z",
+                    modified: "2026-01-03T00:00:00Z", folder: "Cooking", body: "=1,\"x\"\nend"),
         ]
     }
 
@@ -94,15 +98,25 @@ import BackupCore
         #expect(Self.encodeCSV(Self.seededCalls) == expected)
     }
 
-    @Test func notesGoldenIsByteExactWithDashAndAtLeadingNeutralized() {
-        // M4: the dash- and @-leading titles are neutralized to '-… / '@…; the comma snippet is quoted;
-        // the quote snippet is doubled+quoted. This is the ratified K6 mutation, not corruption.
+    @Test func notesGoldenIsByteExactWithBodyColumnThroughEmit() throws {
+        // SP3.2 (v2 contract — REWRITTEN from the v1 no-body golden): the notes CSV now carries a
+        // trailing `body` column. Routed through `Backup.Export.emit` (Odb F4) so the real
+        // emit → writeGuarded path is byte-checked, not just the pure encoder. M4: the dash-/@-leading
+        // titles neutralize to '-… / '@…; the comma/quote snippets are quoted/doubled. Row 3's body
+        // exercises comma + quote + newline + a leading `=` through the UNCHANGED encoder (K6 `'` prefix,
+        // then RFC-4180 quoting/doubling) — the ratified mutation, not corruption.
+        let dir = try Self.makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let out = dir.appendingPathComponent("notes.csv").path
+        try Backup.Export.emit(Self.seededNotes, store: "notes", format: .csv, to: out, force: false)
+
         let expected = Self.golden([
-            "title,snippet,created,modified,folder",
-            "'- shopping list,\"milk, eggs\",2026-05-30T14:00:00Z,2026-06-13T08:12:00Z,Shopping",
-            "'@mentions,\"say \"\"hi\"\"\",2026-04-02T19:20:00Z,2026-06-01T21:05:00Z,",
+            "title,snippet,created,modified,folder,body",
+            "'- shopping list,\"milk, eggs\",2026-05-30T14:00:00Z,2026-06-13T08:12:00Z,Shopping,",
+            "'@mentions,\"say \"\"hi\"\"\",2026-04-02T19:20:00Z,2026-06-01T21:05:00Z,,",
+            "Recipe,s,2026-01-02T00:00:00Z,2026-01-03T00:00:00Z,Cooking,\"'=1,\"\"x\"\"\nend\"",
         ])
-        #expect(Self.encodeCSV(Self.seededNotes) == expected)
+        #expect(try Data(contentsOf: URL(fileURLWithPath: out)) == expected)
     }
 
     // MARK: --format csv writes 0600, no-clobber, --force (shared writeGuarded core)

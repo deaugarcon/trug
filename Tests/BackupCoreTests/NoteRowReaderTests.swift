@@ -195,6 +195,151 @@ import Foundation
         #expect(rows[0].snippet != "pre-lock preview text") // the stored plaintext never leaks
     }
 
+    // MARK: SP3.2 — decoded body (round-trip, absent→nil, locked→"" withhold, fail-closed, fan-out)
+
+    @Test func bodyDecodesRoundTrip() throws {
+        let text = "Full synthetic note body — line two ✓ 🗒️"
+        let root = try Self.seededBackupRoot([
+            .init(title: "Has body", snippet: "s", createdAppleEpochSeconds: 100,
+                  modifiedAppleEpochSeconds: 100, folderName: nil, locked: false, body: text),
+        ])
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let rows = try BackupRowReader().notes(
+            udidDir: root.appendingPathComponent("U"), password: "", limit: nil)
+        #expect(rows.count == 1)
+        #expect(rows[0].body == text)
+    }
+
+    @Test func bodyAbsentIsNilWhenNoNoteDataRow() throws {
+        let root = try Self.seededBackupRoot([
+            .init(title: "No body", snippet: "s", createdAppleEpochSeconds: 100,
+                  modifiedAppleEpochSeconds: 100, folderName: nil, locked: false),   // no ZICNOTEDATA row
+        ])
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let rows = try BackupRowReader().notes(
+            udidDir: root.appendingPathComponent("U"), password: "", limit: nil)
+        #expect(rows.count == 1)
+        #expect(rows[0].body == nil)   // absent → nil (M1-parallel, key omitted)
+    }
+
+    @Test func lockedBodyWithheldAsEmptyStringRegardlessOfZDataContent() throws {
+        // Odb F5: locked-body privacy backstop. One locked note carries CIPHERTEXT-shaped bytes (models
+        // an encrypted body), another carries a fully DECODABLE gzip body. Both are withheld as "" —
+        // the SQL CASE NULLs the bytes for a locked note and the marshal returns "" before any decode —
+        // so neither the ciphertext nor the decodable plaintext is ever disclosed.
+        let ciphertext = Data((0..<64).map { UInt8(($0 &* 37 &+ 11) & 0xFF) })   // synthetic, non-gzip
+        let root = try Self.seededBackupRoot([
+            .init(title: "Locked ciphertext", snippet: "", createdAppleEpochSeconds: 200,
+                  modifiedAppleEpochSeconds: 200, folderName: nil, locked: true, rawZDataOverride: ciphertext),
+            .init(title: "Locked with decodable body", snippet: "", createdAppleEpochSeconds: 100,
+                  modifiedAppleEpochSeconds: 100, folderName: nil, locked: true, body: "would-be plaintext"),
+        ])
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let rows = try BackupRowReader().notes(
+            udidDir: root.appendingPathComponent("U"), password: "", limit: nil)
+        #expect(rows.count == 2)
+        #expect(rows.allSatisfy { $0.body == "" })                     // BOTH withheld as "" (not nil)
+        #expect(!rows.contains { $0.body == "would-be plaintext" })    // decodable plaintext NOT disclosed
+        #expect(rows.map(\.title) == ["Locked ciphertext", "Locked with decodable body"])   // titles listable
+    }
+
+    @Test func malformedBodyDoesNotAbortReadAndOthersStillDecode() throws {
+        // The decoder is total: an undecodable ZDATA on one note fails closed to nil WITHOUT aborting
+        // the read, and the surrounding well-formed notes still decode (Odb F2 blast-radius bound).
+        let junk = Data("this is not a gzip stream".utf8)
+        let root = try Self.seededBackupRoot([
+            .init(title: "Good A", snippet: "s", createdAppleEpochSeconds: 300,
+                  modifiedAppleEpochSeconds: 300, folderName: nil, locked: false, body: "body A"),
+            .init(title: "Malformed", snippet: "s", createdAppleEpochSeconds: 200,
+                  modifiedAppleEpochSeconds: 200, folderName: nil, locked: false, rawZDataOverride: junk),
+            .init(title: "Good B", snippet: "s", createdAppleEpochSeconds: 100,
+                  modifiedAppleEpochSeconds: 100, folderName: nil, locked: false, body: "body B"),
+        ])
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let rows = try BackupRowReader().notes(
+            udidDir: root.appendingPathComponent("U"), password: "", limit: nil)
+        #expect(rows.count == 3)               // the bad row does NOT abort the read
+        // Ordered by ZMODIFICATIONDATE1 DESC: Good A (300), Malformed (200), Good B (100).
+        #expect(rows[0].body == "body A")
+        #expect(rows[1].body == nil)           // fail-closed: undecodable → nil (key omitted)
+        #expect(rows[2].body == "body B")
+    }
+
+    @Test func emptyBodyDecodesToEmptyString() throws {
+        let root = try Self.seededBackupRoot([
+            .init(title: "Empty body", snippet: "s", createdAppleEpochSeconds: 100,
+                  modifiedAppleEpochSeconds: 100, folderName: nil, locked: false, body: ""),
+        ])
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let rows = try BackupRowReader().notes(
+            udidDir: root.appendingPathComponent("U"), password: "", limit: nil)
+        #expect(rows.count == 1)
+        #expect(rows[0].body == "")   // gzip of an empty-text proto decodes to "" (present-empty, not nil)
+    }
+
+    @Test func bodyFanOutReturnsSingleRowViaCorrelatedSubquery() throws {
+        // Odb F1: a note with MULTIPLE ZICNOTEDATA rows must still emit the note EXACTLY ONCE (no JOIN
+        // fan-out). The correlated subquery's `ORDER BY d.Z_PK ASC LIMIT 1` deterministically selects
+        // the first-inserted (primary) body.
+        let secondRow = Data(FixtureBuilder.gzip(FixtureBuilder.noteProtoBytes(text: "second duplicate body")))
+        let root = try Self.seededBackupRoot([
+            .init(title: "Fan-out note", snippet: "s", createdAppleEpochSeconds: 100,
+                  modifiedAppleEpochSeconds: 100, folderName: nil, locked: false,
+                  body: "primary body", extraZData: [secondRow]),
+        ])
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let rows = try BackupRowReader().notes(
+            udidDir: root.appendingPathComponent("U"), password: "", limit: nil)
+        #expect(rows.count == 1)                   // exactly one row — no fan-out
+        #expect(rows[0].body == "primary body")    // deterministic Z_PK-ASC tie-break
+    }
+
+    @Test func lockedNoteCiphertextNeverReachesSerializedExport() throws {
+        // F3t (Low hardening) — byte-level end-to-end: the REAL reader on a ciphertext-seeded locked note
+        // strips the bytes BEFORE any serialization can see them, so the ciphertext cannot appear in the
+        // export output; the sibling unlocked note's decoded marker DOES (the assertion is non-vacuous).
+        // The serialization half — reader output through Backup.Export.emit to the FILE — is covered by
+        // lockedNoteBodyNotDisclosedInExportFile (TetherCLITests); emit wraps these same rows in
+        // ExportEnvelope + writeGuardedFile and invents no content, so the two tests compose into the full
+        // reader → emit → file chain across the two test targets.
+        let sentinel = "CIPHERTEXT-SENTINEL-DO-NOT-LEAK"
+        let lockedCiphertext = Data(sentinel.utf8) + Data((0..<48).map { UInt8(($0 &* 53 &+ 7) & 0xFF) })
+        let unlockedMarker = "UNLOCKED-MARKER-DECODED-7F3A"
+        let root = try Self.seededBackupRoot([
+            .init(title: "Locked", snippet: "", createdAppleEpochSeconds: 200,
+                  modifiedAppleEpochSeconds: 200, folderName: nil, locked: true,
+                  rawZDataOverride: lockedCiphertext),        // opaque, non-gzip ("ciphertext-shaped")
+            .init(title: "Open", snippet: "s", createdAppleEpochSeconds: 100,
+                  modifiedAppleEpochSeconds: 100, folderName: nil, locked: false, body: unlockedMarker),
+        ])
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let rows = try BackupRowReader().notes(
+            udidDir: root.appendingPathComponent("U"), password: "", limit: nil)
+        #expect(rows.count == 2)
+        // (a) the locked note's body is the withhold "" in the parsed rows.
+        let locked = try #require(rows.first { $0.title == "Locked" })
+        #expect(locked.body == "")
+
+        // Serialize the reader output to bytes over the public Codable rows (the disclosure surface emit
+        // serializes), pretty+sorted to match the export encoder config.
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        let bytes = try encoder.encode(rows)
+
+        // (b) neither the raw ciphertext bytes nor its recognizable sentinel appears anywhere in the output.
+        #expect(bytes.range(of: lockedCiphertext) == nil)
+        #expect(bytes.range(of: Data(sentinel.utf8)) == nil)
+        // (c) non-vacuous: the UNLOCKED note's decoded marker DOES appear (the export is not simply empty).
+        #expect(bytes.range(of: Data(unlockedMarker.utf8)) != nil)
+    }
+
     // MARK: P3 — SQL-layer cap
 
     @Test func limitCapsAtSQLLayer() throws {
@@ -211,19 +356,33 @@ import Foundation
         #expect(all.count == Self.seededNotes.count)
     }
 
-    @Test func limitIsInTheSQLString() {
+    @Test func notesSelectIsAdditiveWithBodySubquery() {
         let cappedSQL = BackupRowReader.Schema.notesSelect(limit: 2)
         let fullSQL = BackupRowReader.Schema.notesSelect(limit: nil)
-        #expect(cappedSQL.contains("LIMIT 2"))
-        #expect(!fullSQL.contains("LIMIT"))
-        // The H1 discriminator resolves ICNote's entity code BY NAME from Z_PRIMARYKEY (M1) — not a
-        // hardcoded integer, not title-nullness. This is the device-portability fix.
-        #expect(cappedSQL.contains("o.Z_ENT = (SELECT Z_ENT FROM Z_PRIMARYKEY WHERE Z_NAME = 'ICNote')"))
+
+        // The OUTER inspect cap is appended with a leading newline; the full-store path has NO outer
+        // cap. The correlated subquery's inline `LIMIT 1` is not the outer cap, so it is not matched.
+        #expect(cappedSQL.contains("\nLIMIT 2"))
+        #expect(!fullSQL.contains("\nLIMIT"))
+
+        // BYTE-IDENTICAL to v1 (these clauses are PINNED unchanged by the additive SP3.2 columns): the
+        // H1 entity WHERE resolved BY NAME (M1, not hardcoded, not title-nullness), the M2 snippet CASE,
+        // the ORDER BY, and the seconds-normalizer CAST.
+        #expect(cappedSQL.contains("WHERE o.Z_ENT = (SELECT Z_ENT FROM Z_PRIMARYKEY WHERE Z_NAME = 'ICNote')"))
         #expect(!cappedSQL.contains("ZTITLE1 IS NOT NULL"))
-        // M2: a locked note's snippet is WITHHELD at the SQL layer (ZISPASSWORDPROTECTED guard).
         #expect(cappedSQL.contains("CASE WHEN o.ZISPASSWORDPROTECTED = 1 THEN '' ELSE o.ZSNIPPET END"))
-        // The seconds normalizer's CAST lock is visible (same as calls).
+        #expect(cappedSQL.contains("ORDER BY o.ZMODIFICATIONDATE1 DESC, o.Z_PK ASC"))
         #expect(cappedSQL.contains("CAST(o.ZCREATIONDATE1 AS INTEGER)"))
+
+        // SP3.2 additive columns: the locked flag (col 5) and the body CASE (col 6) whose ELSE arm is a
+        // CORRELATED SCALAR SUBQUERY — NOT a LEFT JOIN (Odb F1: no row fan-out). The locked→NULL withhold
+        // lives INSIDE the CASE so a locked note's bytes never leave SQL.
+        #expect(cappedSQL.contains("o.ZISPASSWORDPROTECTED AS locked"))
+        #expect(cappedSQL.contains("CASE WHEN o.ZISPASSWORDPROTECTED = 1 THEN NULL"))
+        #expect(cappedSQL.contains("SELECT d.ZDATA FROM ZICNOTEDATA AS d"))
+        #expect(cappedSQL.contains("WHERE d.ZNOTE = o.Z_PK"))
+        #expect(cappedSQL.contains("ORDER BY d.Z_PK ASC LIMIT 1"))
+        #expect(!cappedSQL.contains("LEFT JOIN ZICNOTEDATA"))
     }
 
     // MARK: P1 — encrypted read + lazy password

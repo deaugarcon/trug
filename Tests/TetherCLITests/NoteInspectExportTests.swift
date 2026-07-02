@@ -13,7 +13,7 @@ import BackupCore
 ///   K3  NO `body` key ever appears in export (preview scope; body deferred to SP3.2).
 ///   E2  export is FULL + UNMASKED — a >40-char title/snippet appears UNTRUNCATED (inverse of inspect).
 ///   E3  M1 — nil created/modified export with NO key and NO fabricated 2001 epoch.
-///   I3  redact(NoteRow) truncates title+snippet to 40 (K5); created/modified/folder pass; nil → (none).
+///   I3  redact(NoteRow) truncates title+snippet+folder to 40 (K5 Deau ruling); created/modified pass; nil → (none).
 ///   I1  inspect noteTable truncates the over-long title/snippet with an ellipsis.
 ///   I2  inspect noteJSON is capped + redacted with preview keys.
 ///   W1  the `notes` selector parses on both inspect and export; it is in Store.allCases.
@@ -35,33 +35,68 @@ import BackupCore
         return try encoder.encode(env)
     }
 
-    // MARK: E1 / K3 — §10.2 envelope round-trip, and NO body key
+    private static func makeTempDir() throws -> URL {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("notes-export-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir
+    }
 
-    @Test func notesEnvelopeRoundTripsToSection102SchemaWithNoBody() throws {
-        let rows = Self.seededNotes
-        let env = ExportEnvelope(store: "notes", rows: rows)
-        let data = try Self.encode(env)
+    // MARK: 16 — §10.2 export JSON is schema_version 2 WITH body, asserted through emit (Odb F4)
 
+    @Test func notesExportJSONIsSchemaVersion2WithBody() throws {
+        // SP3.2 (v2 — REWRITTEN from the v1 no-body envelope gate): the notes export JSON is
+        // schema_version 2 and carries `body`. Routed through `Backup.Export.emit` so the version is
+        // asserted on the REAL emit path (the type-carried `ExportSchemaVersioned`), not a
+        // direct-construct default. A decoded body ships verbatim; a nil body OMITS the key
+        // (M1-parallel); a locked note's withheld body ships as "" (present-empty, M2-parallel).
+        let rows = [
+            NoteRow(title: "Has body", snippet: "s", created: "2026-01-01T00:00:00Z",
+                    modified: "2026-01-01T00:00:00Z", folder: nil, body: "decoded note text"),
+            NoteRow(title: "No body", snippet: "s", created: "2026-01-01T00:00:00Z",
+                    modified: "2026-01-01T00:00:00Z", folder: nil, body: nil),
+            NoteRow(title: "Locked", snippet: "", created: "2026-01-01T00:00:00Z",
+                    modified: "2026-01-01T00:00:00Z", folder: nil, body: ""),
+        ]
+        let dir = try Self.makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let out = dir.appendingPathComponent("notes.json").path
+        try Backup.Export.emit(rows, store: "notes", format: .json, to: out, force: false)
+
+        let data = try Data(contentsOf: URL(fileURLWithPath: out))
         let obj = try #require(try JSONSerialization.jsonObject(with: data) as? [String: Any])
         #expect(Set(obj.keys) == ["store", "schema_version", "count", "rows"])
-        #expect(obj["schema_version"] as? Int == 1)
-        #expect(obj["count"] as? Int == rows.count)
+        #expect(obj["schema_version"] as? Int == 2)        // notes bumped to v2 THROUGH emit
         #expect(obj["store"] as? String == "notes")
+        #expect(obj["count"] as? Int == rows.count)
 
         let rowObjs = try #require(obj["rows"] as? [[String: Any]])
-        let first = try #require(rowObjs.first)   // Groceries has a folder → all five keys present
-        for key in ["title", "snippet", "created", "modified", "folder"] {
-            #expect(first.keys.contains(key))
-        }
-        // K3: NO body field ships in schema_version 1 — not even a null placeholder, on ANY row.
-        for row in rowObjs { #expect(row["body"] == nil) }
-        let json = String(decoding: data, as: UTF8.self)
-        #expect(!json.contains("\"body\""))
+        #expect(rowObjs[0]["body"] as? String == "decoded note text")   // decoded body ships verbatim
+        #expect(rowObjs[1].keys.contains("body") == false)              // nil body → key OMITTED (M1)
+        #expect(rowObjs[2]["body"] as? String == "")                    // locked withhold → present "" (M2)
 
         let decoded = try JSONDecoder().decode(ExportEnvelope<NoteRow>.self, from: data)
-        #expect(decoded.store == "notes")
-        #expect(decoded.schemaVersion == 1)
+        #expect(decoded.schemaVersion == 2)
         #expect(decoded.rows == rows)
+    }
+
+    // MARK: 17 — non-notes stores stay schema_version 1 through the SAME emit path
+
+    @Test func nonNotesExportStaysSchemaVersion1() throws {
+        // messages/contacts/calls keep schema_version 1 (byte-stable goldens); only notes bumps. Proven
+        // on the emit path so the per-store version carrier is exercised, not assumed.
+        let messages = [
+            MessageRow(body: "hi", date: "2026-01-01T00:00:00Z", service: "SMS",
+                       isFromMe: false, sender: nil, chat: "c"),
+        ]
+        let dir = try Self.makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let out = dir.appendingPathComponent("messages.json").path
+        try Backup.Export.emit(messages, store: "messages", format: .json, to: out, force: false)
+
+        let obj = try #require(try JSONSerialization.jsonObject(
+            with: Data(contentsOf: URL(fileURLWithPath: out))) as? [String: Any])
+        #expect(obj["schema_version"] as? Int == 1)
     }
 
     // MARK: E2 — FULL + UNMASKED (the inverse of inspect): a long title/snippet is NOT truncated
@@ -119,6 +154,47 @@ import BackupCore
         #expect(r.folder == "(none)")
     }
 
+    // MARK: K5 (Deau ruling) — folder truncates symmetrically with title/snippet
+
+    @Test func redactTruncatesLongFolderSymmetricallyWithTitleAndSnippet() {
+        // K5: folder truncates at previewBodyMax (40), grapheme-safe, with a trailing `…`, via the SAME
+        // redactBody path title/snippet use — no separate truncated flag (RedactedNote records note-field
+        // truncation solely by the `…` in the string). A folder of ≤ 40 passes through unchanged; the
+        // 40-char boundary yields NO ellipsis (exactly as title/snippet).
+        let longFolder = String(repeating: "F", count: 60)
+        let r = InspectRedaction.redact(NoteRow(
+            title: "t", snippet: "s", created: "2026-01-01T00:00:00Z",
+            modified: "2026-01-01T00:00:00Z", folder: longFolder))
+        #expect(r.folder == String(longFolder.prefix(InspectRedaction.previewBodyMax)) + "…")
+        #expect(r.folder.count == InspectRedaction.previewBodyMax + 1)   // 40 kept + `…`
+        #expect(r.folder.hasSuffix("…"))
+
+        let exact40 = String(repeating: "G", count: InspectRedaction.previewBodyMax)
+        let atBoundary = InspectRedaction.redact(NoteRow(
+            title: "t", snippet: "s", created: nil, modified: nil, folder: exact40))
+        #expect(atBoundary.folder == exact40)             // ≤ 40 unchanged
+        #expect(!atBoundary.folder.hasSuffix("…"))        // no ellipsis at the boundary
+    }
+
+    @Test func noteTableAndJSONTruncateLongFolder() throws {
+        // Both render paths consume the SAME redact() output, so the long folder truncates in the table
+        // AND the --json envelope; the full folder appears in NEITHER. title/snippet are short here so the
+        // only `…` source is the folder.
+        let longFolder = String(repeating: "F", count: 60)
+        let truncated = String(longFolder.prefix(InspectRedaction.previewBodyMax)) + "…"
+        let rows = [
+            NoteRow(title: "t", snippet: "s", created: "2026-01-01T00:00:00Z",
+                    modified: "2026-01-01T00:00:00Z", folder: longFolder),
+        ]
+        let table = InspectRedaction.noteTable(rows, limit: 20).rendered()
+        #expect(table.contains("…"))
+        #expect(!table.contains(longFolder))
+
+        let json = String(decoding: try JSONEncoder().encode(InspectRedaction.noteJSON(rows, limit: 20)), as: UTF8.self)
+        #expect(json.contains(truncated))
+        #expect(!json.contains(longFolder))
+    }
+
     // MARK: I1 — inspect noteTable truncates the over-long title/snippet
 
     @Test func noteTableTruncatesLongFields() {
@@ -165,5 +241,49 @@ import BackupCore
     @Test func notesIsAnInScopeStore() {
         #expect(Backup.Inspect.Store.allCases.contains(.notes))
         #expect(Backup.Export.Store.allCases.contains(.notes))
+    }
+
+    // MARK: 19 — EXPORT-ONLY body policy (SOLVE §4): inspect carries NO body column, even with a body
+
+    @Test func notesInspectHasNoBodyColumn() throws {
+        // The body is disclosed ONLY on the consented export path. The inspect redaction projection has
+        // no body field, so neither the table nor the --json envelope carries one — even when the
+        // underlying NoteRow has a fully populated (sensitive) body. Reads InspectRedaction only; the
+        // inspect no-body invariant stays byte-stable.
+        let rows = [
+            NoteRow(title: "t", snippet: "s", created: "2026-01-01T00:00:00Z",
+                    modified: "2026-01-01T00:00:00Z", folder: "F", body: "sensitive decoded body"),
+        ]
+        #expect(!InspectRedaction.noteHeader.contains("body"))
+        let table = InspectRedaction.noteTable(rows, limit: 20).rendered()
+        #expect(!table.contains("sensitive decoded body"))
+        let json = String(decoding: try JSONEncoder().encode(InspectRedaction.noteJSON(rows, limit: 20)), as: UTF8.self)
+        #expect(!json.contains("\"body\""))
+        #expect(!json.contains("sensitive decoded body"))
+    }
+
+    // MARK: 20 — a locked note's body is not disclosed in the export FILE (withheld "" ships faithfully)
+
+    @Test func lockedNoteBodyNotDisclosedInExportFile() throws {
+        // The reader withholds a locked note's body as "" at the SQL/marshal layer (proven in
+        // NoteRowReaderTests); emit serializes that faithfully — the export file shows the locked note's
+        // body as "" (present-empty), never a value. A sibling unlocked note's body ships in full, so the
+        // "" is a deliberate withhold, not a blanket omission.
+        let rows = [
+            NoteRow(title: "Locked", snippet: "", created: "2026-01-01T00:00:00Z",
+                    modified: "2026-01-01T00:00:00Z", folder: nil, body: ""),
+            NoteRow(title: "Open", snippet: "s", created: "2026-01-01T00:00:00Z",
+                    modified: "2026-01-01T00:00:00Z", folder: nil, body: "open note plaintext"),
+        ]
+        let dir = try Self.makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let out = dir.appendingPathComponent("notes.json").path
+        try Backup.Export.emit(rows, store: "notes", format: .json, to: out, force: false)
+
+        let decoded = try JSONDecoder().decode(ExportEnvelope<NoteRow>.self,
+                                               from: Data(contentsOf: URL(fileURLWithPath: out)))
+        #expect(decoded.schemaVersion == 2)
+        #expect(decoded.rows[0].body == "")                     // locked → withheld ""
+        #expect(decoded.rows[1].body == "open note plaintext")  // unlocked → full body
     }
 }

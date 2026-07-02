@@ -159,7 +159,8 @@ import BackupCore
         #expect(MessageRow.csvHeader == ["body", "date", "service", "is_from_me", "sender", "chat"])
         #expect(ContactRow.csvHeader == ["first", "last", "organization", "primary_phone", "primary_email"])
         #expect(CallRow.csvHeader == ["address", "date", "duration", "direction", "call_type"])
-        #expect(NoteRow.csvHeader == ["title", "snippet", "created", "modified", "folder"])
+        // SP3.2 appends `body` LAST (§5.2 order == JSON CodingKeys order); the other three are unchanged.
+        #expect(NoteRow.csvHeader == ["title", "snippet", "created", "modified", "folder", "body"])
     }
 
     @Test func callRowRendersDurationAndNilDateFields() {

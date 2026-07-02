@@ -84,9 +84,10 @@ enum InspectRedaction {
         }
     }
 
-    /// A redacted note row for table + JSON (K5): `title` + `snippet` truncated to `previewBodyMax`
-    /// (40) via `redactBody`; `created`/`modified`/`folder` pass through. A nil/empty field → `(none)`;
-    /// a nil date (M1) → `(none)` (NEVER a fabricated epoch). No `body` field exists (K3 preview scope).
+    /// A redacted note row for table + JSON (K5): `title`, `snippet`, AND `folder` truncated to
+    /// `previewBodyMax` (40) via `redactBody` (folder truncation is the Deau K5 ruling); `created`/
+    /// `modified` pass through. A nil/empty field → `(none)`; a nil date (M1) → `(none)` (NEVER a
+    /// fabricated epoch). No `body` field exists (export-only body policy).
     struct RedactedNote: Encodable, Equatable {
         let title: String
         let snippet: String
@@ -227,18 +228,21 @@ enum InspectRedaction {
             callType: row.callType ?? noneToken)
     }
 
-    /// Redacts a note row (K5): `title` and `snippet` are truncated to `previewBodyMax` (40) via
-    /// `redactBody` (grapheme-safe, ellipsis when longer); `created`/`modified`/`folder` pass through.
-    /// A nil/empty title/snippet/folder → `(none)`; a nil date (M1) → `(none)`, NEVER a forged epoch.
+    /// Redacts a note row (K5): `title`, `snippet`, AND `folder` are truncated to `previewBodyMax` (40)
+    /// via `redactBody` (grapheme-safe, ellipsis when longer) — the folder truncation is the Deau K5
+    /// ruling, symmetric with title/snippet (same path, no separate truncated flag). `created`/`modified`
+    /// pass through. A nil/empty title/snippet/folder → `(none)`; a nil date (M1) → `(none)`, NEVER a
+    /// forged epoch.
     static func redact(_ row: NoteRow) -> RedactedNote {
         let title = redactBody(row.title).text
         let snippet = redactBody(row.snippet).text
+        let folder = redactBody(row.folder).text
         return RedactedNote(
             title: title.isEmpty ? noneToken : title,
             snippet: snippet.isEmpty ? noneToken : snippet,
             created: row.created ?? noneToken,
             modified: row.modified ?? noneToken,
-            folder: (row.folder?.isEmpty == false) ? (row.folder ?? noneToken) : noneToken)
+            folder: folder.isEmpty ? noneToken : folder)
     }
 
     // MARK: Table assembly (default output)
